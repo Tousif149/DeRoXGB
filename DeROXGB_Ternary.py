@@ -272,7 +272,7 @@ for epoch in range(epochs):
         best_val_acc_deberta = val_acc
         counter = 0
         torch.save(deberta_model.state_dict(), 'deberta_v3_large_model.pt')
-        print("✅ Saved best model to deberta_v3_large_model.pt")
+        print(" Saved best model to deberta_v3_large_model.pt")
     else:
         counter += 1
         if counter >= patience:
@@ -291,7 +291,7 @@ df_stats_deberta = pd.DataFrame({
 df_stats_deberta.to_csv('training_validation_stats_deberta.csv', index=False)
 print("Training and validation stats saved to 'training_validation_stats_deberta.csv'.")
 
-print("\n✅ DeBERTa fine-tuning completed!")
+print("\n DeBERTa fine-tuning completed!")
 
 # === SECTION 4: DeBERTa EMBEDDINGS -> XGBoost ===
 print("\n=== SECTION 4: DeBERTa EMBEDDINGS → XGBoost ===")
@@ -328,7 +328,7 @@ xgb_clf_deberta.fit(train_embeddings_deberta, train_labels_deberta)
 xgb_preds_deberta = xgb_clf_deberta.predict(test_embeddings_deberta)
 
 # === SECTION 5: RoBERTa-Large CLASSIFIER + EMBEDDINGS + XGBoost ===
-print("\n=== SECTION 7: RoBERTa-Large CLASSIFIER + XGBoost ===")
+print("\n=== SECTION 5: RoBERTa-Large CLASSIFIER + XGBoost ===")
 
 # Tokenizer
 tokenizer_roberta = AutoTokenizer.from_pretrained('roberta-large')
@@ -442,7 +442,7 @@ xgb_clf_roberta.fit(train_embeddings_roberta, train_labels_roberta)
 xgb_preds_roberta = xgb_clf_roberta.predict(test_embeddings_roberta)
 
 # === SECTION 6: ENSEMBLE — DeBERTa_XGBoost + RoBERTa_XGBoost ===
-print("\n=== SECTION 9: ENSEMBLE — DeBERTa_XGBoost + RoBERTa_XGBoost ===")
+print("\n=== SECTION 6: ENSEMBLE — DeBERTa_XGBoost + RoBERTa_XGBoost ===")
 
 # Prepare probabilities
 xgb_probs_deberta = xgb_clf_deberta.predict_proba(test_embeddings_deberta)
