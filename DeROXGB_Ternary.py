@@ -50,7 +50,7 @@ def preprocess_text(text):
         return ""
     # Expand contractions first
     text = contractions.fix(text)
-    text = remove_emojis(text)  # remove emojis 
+    text = remove_emojis(text)                       # remove emojis 
     text = re.sub(r'http\S+', '', text)              # remove URLs
     text = re.sub(r'@\w+', '', text)                 # remove mentions
     text = re.sub(r'[^a-zA-Z0-9\s]', '', text)       # remove special characters
@@ -63,7 +63,7 @@ def map_labels(labels):
     return [label_map.get(l.lower(), 0) if isinstance(l, str) else l for l in labels]
 
 # Load data 
-data = pd.read_csv('/kaggle/input/eda-augment/augmented_tweets.csv')
+data = pd.read_csv('augmented_tweets.csv')
 data['text'] = data['text'].apply(preprocess_text)
 data = data[data['text'] != ""] 
 
