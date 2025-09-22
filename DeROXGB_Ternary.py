@@ -87,7 +87,7 @@ print(data['label'].value_counts(dropna=False))
 # === SECTION 2 — HYPERPARAMETERS ===
 max_length = 128
 batch_size = 32
-epochs = 1
+epochs = 7
 patience = 3
 learning_rate = 2e-5
 
