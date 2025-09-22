@@ -22,7 +22,6 @@ from torch.cuda.amp import autocast, GradScaler
 import random
 import os
 import xgboost as xgb
-import lightgbm as lgb
 import emoji
 
 # SEED for reproducibility
@@ -34,16 +33,14 @@ torch.cuda.manual_seed(SEED)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# Logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger()
 
-# Device setup
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 num_gpus = torch.cuda.device_count()
 print(f"Available GPUs: {num_gpus} (PyTorch)")
 
-# === SECTION 1 — DATA LOADING, PREPROCESSING, SPLITS ===
+# === SECTION 1 — PREPROCESSING ===
 # Preprocessing functions
 def remove_emojis(text):
     return emoji.replace_emoji(text, replace='')
@@ -51,7 +48,7 @@ def remove_emojis(text):
 def preprocess_text(text):
     if not isinstance(text, str) or not text.strip():
         return ""
-        # Expand contractions first
+    # Expand contractions first
     text = contractions.fix(text)
     text = remove_emojis(text)  # remove emojis 
     text = re.sub(r'http\S+', '', text)              # remove URLs
@@ -65,23 +62,19 @@ def map_labels(labels):
     label_map = {'negative': 0, 'neutral': 1, 'positive': 2}
     return [label_map.get(l.lower(), 0) if isinstance(l, str) else l for l in labels]
 
-# Load data and detect label column
+# Load data 
 data = pd.read_csv('/kaggle/input/eda-augment/augmented_tweets.csv')
 data['text'] = data['text'].apply(preprocess_text)
-data = data[data['text'] != ""]  # filter out empty rows
+data = data[data['text'] != ""] 
 
-# Automatically detect label column (try 'airline_sentiment' first, then 'label')
 label_column = 'airline_sentiment' if 'airline_sentiment' in data.columns else 'label'
 print(f"Using label column: {label_column}")
 
-# Map string labels to integers
 data['label'] = map_labels(data[label_column].values)
 
-# Split
-train_val, test = train_test_split(data, test_size=0.15, random_state=SEED, stratify=data['label'])
-train, val = train_test_split(train_val, test_size=0.17647, random_state=SEED, stratify=train_val['label'])
+train_val, test = train_test_split(data, test_size=0.2, random_state=SEED, stratify=data['label'])
+train, val = train_test_split(train_val, test_size=0.25, random_state=SEED, stratify=train_val['label'])
 
-# Prepare arrays with mapped labels
 train_texts = train['text'].values
 train_labels = train['label'].values
 val_texts   = val['text'].values
@@ -89,13 +82,12 @@ val_labels  = val['label'].values
 test_texts  = test['text'].values
 test_labels = test['label'].values
 
-# No need to map labels — already 0, 1, 2
-print(data['label'].value_counts(dropna=False))  # optional sanity check
+print(data['label'].value_counts(dropna=False)) 
 
 # === SECTION 2 — HYPERPARAMETERS ===
 max_length = 128
 batch_size = 32
-epochs = 7
+epochs = 1
 patience = 3
 learning_rate = 2e-5
 
@@ -299,57 +291,9 @@ df_stats_deberta = pd.DataFrame({
 df_stats_deberta.to_csv('training_validation_stats_deberta.csv', index=False)
 print("Training and validation stats saved to 'training_validation_stats_deberta.csv'.")
 
-# === Final message ===
 print("\n✅ DeBERTa fine-tuning completed!")
 
-# === DEBERTA CLASSIFICATION REPORT ===
-
-# Load best model
-deberta_model.load_state_dict(torch.load('deberta_v3_large_model.pt'))
-deberta_model.eval()
-
-# Predict on test set
-test_predictions_deberta = []
-test_true_labels_deberta = []
-
-with torch.no_grad():
-    for batch in tqdm(test_loader, desc="DeBERTa Testing"):
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-        labels = batch['label'].to(device)
-
-        outputs = deberta_model(input_ids=input_ids, attention_mask=attention_mask)
-        probs = nn.functional.softmax(outputs.logits, dim=1)
-        _, predicted = torch.max(probs, 1)
-
-        test_predictions_deberta.extend(predicted.cpu().numpy())
-        test_true_labels_deberta.extend(labels.cpu().numpy())
-
-# === Report ===
-print("\n=== DeBERTa CLASSIFIER ===")
-print("\nClassification Report:")
-report = classification_report(test_true_labels_deberta, test_predictions_deberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4, output_dict=True)
-print(classification_report(test_true_labels_deberta, test_predictions_deberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4))
-print(f"\nOverall Metrics:")
-print(f"Accuracy: {report['accuracy']:.4f}")
-print(f"Precision (macro): {report['macro avg']['precision']:.4f}")
-print(f"Recall (macro): {report['macro avg']['recall']:.4f}")
-print(f"F1-Score (macro): {report['macro avg']['f1-score']:.4f}")
-
-cm_deberta = confusion_matrix(test_true_labels_deberta, test_predictions_deberta)
-print("\nConfusion Matrix:")
-print(cm_deberta)
-
-plt.figure(figsize=(6, 5))
-sns.heatmap(cm_deberta, annot=True, fmt='d', cmap='Blues',
-            xticklabels=['Negative', 'Neutral', 'Positive'],
-            yticklabels=['Negative', 'Neutral', 'Positive'])
-plt.xlabel('Predicted')
-plt.ylabel('True')
-plt.title('DeBERTa Classifier - Confusion Matrix')
-plt.show()
-
-# === SECTION 4: DeBERTa EMBEDDINGS → XGBoost ===
+# === SECTION 4: DeBERTa EMBEDDINGS -> XGBoost ===
 print("\n=== SECTION 4: DeBERTa EMBEDDINGS → XGBoost ===")
 
 # Use fine-tuned encoder
@@ -383,187 +327,13 @@ xgb_clf_deberta = xgb.XGBClassifier(
 xgb_clf_deberta.fit(train_embeddings_deberta, train_labels_deberta)
 xgb_preds_deberta = xgb_clf_deberta.predict(test_embeddings_deberta)
 
-# Report XGBoost results
-print("\n=== DeBERTa EMBEDDINGS + XGBoost CLASSIFIER ===")
-print("\nClassification Report:")
-report = classification_report(test_labels_deberta, xgb_preds_deberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4, output_dict=True)
-print(classification_report(test_labels_deberta, xgb_preds_deberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4))
-print(f"\nOverall Metrics:")
-print(f"Accuracy: {report['accuracy']:.4f}")
-print(f"Precision (macro): {report['macro avg']['precision']:.4f}")
-print(f"Recall (macro): {report['macro avg']['recall']:.4f}")
-print(f"F1-Score (macro): {report['macro avg']['f1-score']:.4f}")
-
-cm_xgb_deberta = confusion_matrix(test_labels_deberta, xgb_preds_deberta)
-print("\nConfusion Matrix:")
-print(cm_xgb_deberta)
-
-plt.figure(figsize=(6, 5))
-sns.heatmap(cm_xgb_deberta, annot=True, fmt='d', cmap='Blues', xticklabels=['Negative', 'Neutral', 'Positive'], yticklabels=['Negative', 'Neutral', 'Positive'])
-plt.xlabel('Predicted')
-plt.ylabel('True')
-plt.title('DeBERTa Embeddings + XGBoost - Confusion Matrix')
-plt.show()
-
-# === SECTION 5: DeBERTa EMBEDDINGS → LightGBM ===
-print("\n=== SECTION 5: DeBERTa EMBEDDINGS → LightGBM ===")
-
-# Import callbacks
-from lightgbm import early_stopping, log_evaluation
-
-# LightGBM classifier
-lgb_clf_deberta = lgb.LGBMClassifier(
-    objective='multiclass',
-    num_class=3,
-    learning_rate=0.1,
-    n_estimators=100,
-    num_leaves=64,
-    max_depth=-1,
-    random_state=SEED,
-    n_jobs=-1
-)
-
-# Fit with callbacks (early stopping + logging)
-eval_set = [(train_embeddings_deberta, train_labels_deberta), (test_embeddings_deberta, test_labels_deberta)]
-eval_names = ['train', 'valid']
-
-lgb_clf_deberta.fit(
-    train_embeddings_deberta, train_labels_deberta,
-    eval_set=eval_set,
-    eval_names=eval_names,
-    eval_metric='multi_logloss',
-    callbacks=[
-        early_stopping(stopping_rounds=10),
-        log_evaluation(period=20)
-    ]
-)
-
-# Predict
-lgb_preds_probs_deberta = lgb_clf_deberta.predict_proba(test_embeddings_deberta)
-lgb_preds_deberta = np.argmax(lgb_preds_probs_deberta, axis=1)
-
-# Report
-print("\n=== DeBERTa EMBEDDINGS + LightGBM CLASSIFIER ===")
-print("\nClassification Report:")
-report = classification_report(test_labels_deberta, lgb_preds_deberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4, output_dict=True)
-print(classification_report(test_labels_deberta, lgb_preds_deberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4))
-print(f"\nOverall Metrics:")
-print(f"Accuracy: {report['accuracy']:.4f}")
-print(f"Precision (macro): {report['macro avg']['precision']:.4f}")
-print(f"Recall (macro): {report['macro avg']['recall']:.4f}")
-print(f"F1-Score (macro): {report['macro avg']['f1-score']:.4f}")
-
-cm_lgb_deberta = confusion_matrix(test_labels_deberta, lgb_preds_deberta)
-print("\nConfusion Matrix:")
-print(cm_lgb_deberta)
-
-plt.figure(figsize=(6, 5))
-sns.heatmap(cm_lgb_deberta, annot=True, fmt='d', cmap='Blues', xticklabels=['Negative', 'Neutral', 'Positive'], yticklabels=['Negative', 'Neutral', 'Positive'])
-plt.xlabel('Predicted')
-plt.ylabel('True')
-plt.title('DeBERTa Embeddings + LightGBM - Confusion Matrix')
-plt.show()
-
-# Plot training + validation logloss
-evals_result = lgb_clf_deberta.evals_result_
-
-plt.figure(figsize=(8, 6))
-plt.plot(evals_result['train']['multi_logloss'], label='Train Multi Logloss')
-plt.plot(evals_result['valid']['multi_logloss'], label='Valid Multi Logloss')
-plt.xlabel('Iteration')
-plt.ylabel('Log Loss')
-plt.title('LightGBM - Training and Validation Log Loss (DeBERTa Embeddings)')
-plt.legend()
-plt.grid()
-plt.show()
-
-# === SECTION 6: ENSEMBLE — DeBERTa_softmax + XGBoost + LightGBM ===
-print("\n=== SECTION 6: ENSEMBLE — DeBERTa_softmax + XGBoost + LightGBM ===")
-
-# Prepare probabilities
-# First need to recompute DeBERTa softmax probs on test set
-print("Recomputing DeBERTa softmax probabilities...")
-deberta_model.eval()
-deberta_probs = []
-
-with torch.no_grad():
-    for batch in tqdm(test_loader, desc="Predicting with DeBERTa"):
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-
-        outputs = deberta_model(input_ids=input_ids, attention_mask=attention_mask)
-        probs = nn.functional.softmax(outputs.logits, dim=1)
-
-        deberta_probs.extend(probs.cpu().numpy())
-
-deberta_probs = np.array(deberta_probs)
-xgb_probs_deberta = xgb_clf_deberta.predict_proba(test_embeddings_deberta)
-lgb_probs_deberta = lgb_preds_probs_deberta
-
-# Averaging ensemble
-avg_probs_deberta = (deberta_probs + xgb_probs_deberta + lgb_probs_deberta) / 3.0
-avg_preds_deberta = np.argmax(avg_probs_deberta, axis=1)
-
-print("\n=== ENSEMBLE (AVERAGING): DeBERTa_softmax + XGBoost + LightGBM ===")
-print("\nClassification Report:")
-report = classification_report(test_labels_deberta, avg_preds_deberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4, output_dict=True)
-print(classification_report(test_labels_deberta, avg_preds_deberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4))
-print(f"\nOverall Metrics:")
-print(f"Accuracy: {report['accuracy']:.4f}")
-print(f"Precision (macro): {report['macro avg']['precision']:.4f}")
-print(f"Recall (macro): {report['macro avg']['recall']:.4f}")
-print(f"F1-Score (macro): {report['macro avg']['f1-score']:.4f}")
-
-cm_avg_deberta = confusion_matrix(test_labels_deberta, avg_preds_deberta)
-print("\nConfusion Matrix:")
-print(cm_avg_deberta)
-
-plt.figure(figsize=(6, 5))
-sns.heatmap(cm_avg_deberta, annot=True, fmt='d', cmap='Blues', xticklabels=['Negative', 'Neutral', 'Positive'], yticklabels=['Negative', 'Neutral', 'Positive'])
-plt.xlabel('Predicted')
-plt.ylabel('True')
-plt.title('ENSEMBLE (AVERAGING) - DeBERTa_softmax + XGBoost + LightGBM')
-plt.show()
-
-# Majority voting
-deberta_preds_majority = np.argmax(deberta_probs, axis=1)
-xgb_preds_majority = np.argmax(xgb_probs_deberta, axis=1)
-lgb_preds_majority = np.argmax(lgb_probs_deberta, axis=1)
-
-final_majority_preds_deberta = []
-for i in range(len(test_labels_deberta)):
-    votes = [deberta_preds_majority[i], xgb_preds_majority[i], lgb_preds_majority[i]]
-    final_pred = max(set(votes), key=votes.count)
-    final_majority_preds_deberta.append(final_pred)
-
-print("\n=== ENSEMBLE (MAJORITY VOTING): DeBERTa_softmax + XGBoost + LightGBM ===")
-print("\nClassification Report:")
-report = classification_report(test_labels_deberta, final_majority_preds_deberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4, output_dict=True)
-print(classification_report(test_labels_deberta, final_majority_preds_deberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4))
-print(f"\nOverall Metrics:")
-print(f"Accuracy: {report['accuracy']:.4f}")
-print(f"Precision (macro): {report['macro avg']['precision']:.4f}")
-print(f"Recall (macro): {report['macro avg']['recall']:.4f}")
-print(f"F1-Score (macro): {report['macro avg']['f1-score']:.4f}")
-
-cm_majority_deberta = confusion_matrix(test_labels_deberta, final_majority_preds_deberta)
-print("\nConfusion Matrix:")
-print(cm_majority_deberta)
-
-plt.figure(figsize=(6, 5))
-sns.heatmap(cm_majority_deberta, annot=True, fmt='d', cmap='Blues', xticklabels=['Negative', 'Neutral', 'Positive'], yticklabels=['Negative', 'Neutral', 'Positive'])
-plt.xlabel('Predicted')
-plt.ylabel('True')
-plt.title('ENSEMBLE (MAJORITY VOTING) - DeBERTa_softmax + XGBoost + LightGBM')
-plt.show()
-
-# === SECTION 7: RoBERTa-Large CLASSIFIER + EMBEDDINGS + XGBoost ===
+# === SECTION 5: RoBERTa-Large CLASSIFIER + EMBEDDINGS + XGBoost ===
 print("\n=== SECTION 7: RoBERTa-Large CLASSIFIER + XGBoost ===")
 
 # Tokenizer
 tokenizer_roberta = AutoTokenizer.from_pretrained('roberta-large')
 
-# Dataset class — re-use but with tokenizer_roberta
+# Dataset class 
 class SentimentDatasetRoberta(Dataset):
     def __init__(self, texts, labels):
         self.texts = texts
@@ -641,49 +411,7 @@ for epoch in range(epochs):
 # Load best model
 roberta_model.load_state_dict(torch.load('roberta_large_model.pt'))
 
-# Evaluate RoBERTa classifier on test set
-roberta_model.eval()
-test_predictions_roberta = []
-test_true_labels_roberta = []
-roberta_probs = []
-
-with torch.no_grad():
-    for batch in tqdm(test_loader_roberta, desc="Predicting with RoBERTa"):
-        input_ids = batch['input_ids'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-        labels = batch['label'].to(device)
-
-        outputs = roberta_model(input_ids=input_ids, attention_mask=attention_mask)
-        probs = nn.functional.softmax(outputs.logits, dim=1)
-        _, predicted = torch.max(probs, 1)
-
-        roberta_probs.extend(probs.cpu().numpy())
-        test_predictions_roberta.extend(predicted.cpu().numpy())
-        test_true_labels_roberta.extend(labels.cpu().numpy())
-
-# Report RoBERTa classifier results
-print("\n=== RoBERTa CLASSIFIER ===")
-print("\nClassification Report:")
-report = classification_report(test_true_labels_roberta, test_predictions_roberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4, output_dict=True)
-print(classification_report(test_true_labels_roberta, test_predictions_roberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4))
-print(f"\nOverall Metrics:")
-print(f"Accuracy: {report['accuracy']:.4f}")
-print(f"Precision (macro): {report['macro avg']['precision']:.4f}")
-print(f"Recall (macro): {report['macro avg']['recall']:.4f}")
-print(f"F1-Score (macro): {report['macro avg']['f1-score']:.4f}")
-
-cm_roberta = confusion_matrix(test_true_labels_roberta, test_predictions_roberta)
-print("\nConfusion Matrix:")
-print(cm_roberta)
-
-plt.figure(figsize=(6, 5))
-sns.heatmap(cm_roberta, annot=True, fmt='d', cmap='Blues', xticklabels=['Negative', 'Neutral', 'Positive'], yticklabels=['Negative', 'Neutral', 'Positive'])
-plt.xlabel('Predicted')
-plt.ylabel('True')
-plt.title('RoBERTa Classifier - Confusion Matrix')
-plt.show()
-
-# === RoBERTa embeddings → XGBoost ===
+# === RoBERTa embeddings -> XGBoost ===
 print("\nExtracting RoBERTa embeddings for XGBoost...")
 
 if isinstance(roberta_model, nn.DataParallel):
@@ -713,163 +441,14 @@ xgb_clf_roberta = xgb.XGBClassifier(
 xgb_clf_roberta.fit(train_embeddings_roberta, train_labels_roberta)
 xgb_preds_roberta = xgb_clf_roberta.predict(test_embeddings_roberta)
 
-# Report XGBoost results
-print("\n=== RoBERTa EMBEDDINGS + XGBoost CLASSIFIER ===")
-print("\nClassification Report:")
-report = classification_report(test_labels_roberta, xgb_preds_roberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4, output_dict=True)
-print(classification_report(test_labels_roberta, xgb_preds_roberta, target_names=['Negative', 'Neutral', 'Positive'], digits=4))
-print(f"\nOverall Metrics:")
-print(f"Accuracy: {report['accuracy']:.4f}")
-print(f"Precision (macro): {report['macro avg']['precision']:.4f}")
-print(f"Recall (macro): {report['macro avg']['recall']:.4f}")
-print(f"F1-Score (macro): {report['macro avg']['f1-score']:.4f}")
+# === SECTION 6: ENSEMBLE — DeBERTa_XGBoost + RoBERTa_XGBoost ===
+print("\n=== SECTION 9: ENSEMBLE — DeBERTa_XGBoost + RoBERTa_XGBoost ===")
 
-cm_xgb_roberta = confusion_matrix(test_labels_roberta, xgb_preds_roberta)
-print("\nConfusion Matrix:")
-print(cm_xgb_roberta)
-
-plt.figure(figsize=(6, 5))
-sns.heatmap(cm_xgb_roberta, annot=True, fmt='d', cmap='Blues', xticklabels=['Negative', 'Neutral', 'Positive'], yticklabels=['Negative', 'Neutral', 'Positive'])
-plt.xlabel('Predicted')
-plt.ylabel('True')
-plt.title('RoBERTa Embeddings + XGBoost - Confusion Matrix')
-plt.show()
-
-# === SECTION 8: ENSEMBLE — DeBERTa + RoBERTa ===
-print("\n=== SECTION 8: ENSEMBLE — DeBERTa + RoBERTa ===")
-
-# Align targets
-assert np.array_equal(test_labels_deberta, test_labels_roberta)
-
-# Prepare for averaging
-deberta_probs_arr = np.array(deberta_probs)
-roberta_probs_arr = np.array(roberta_probs)
+# Prepare probabilities
+xgb_probs_deberta = xgb_clf_deberta.predict_proba(test_embeddings_deberta)
+xgb_probs_roberta = xgb_clf_roberta.predict_proba(test_embeddings_roberta)
 
 # Averaging ensemble
-avg_probs_dr = (deberta_probs_arr + roberta_probs_arr) / 2.0
-avg_preds_dr = np.argmax(avg_probs_dr, axis=1)
-
-print("\n=== ENSEMBLE (AVERAGING): DeBERTa + RoBERTa ===")
-print("\nClassification Report:")
-report = classification_report(test_labels_deberta, avg_preds_dr, target_names=['Negative', 'Neutral', 'Positive'], digits=4, output_dict=True)
-print(classification_report(test_labels_deberta, avg_preds_dr, target_names=['Negative', 'Neutral', 'Positive'], digits=4))
-print(f"\nOverall Metrics:")
-print(f"Accuracy: {report['accuracy']:.4f}")
-print(f"Precision (macro): {report['macro avg']['precision']:.4f}")
-print(f"Recall (macro): {report['macro avg']['recall']:.4f}")
-print(f"F1-Score (macro): {report['macro avg']['f1-score']:.4f}")
-
-cm_avg_dr = confusion_matrix(test_labels_deberta, avg_preds_dr)
-print("\nConfusion Matrix:")
-print(cm_avg_dr)
-
-plt.figure(figsize=(6, 5))
-sns.heatmap(cm_avg_dr, annot=True, fmt='d', cmap='Blues', xticklabels=['Negative', 'Neutral', 'Positive'], yticklabels=['Negative', 'Neutral', 'Positive'])
-plt.xlabel('Predicted')
-plt.ylabel('True')
-plt.title('ENSEMBLE (AVERAGING) - DeBERTa + RoBERTa')
-plt.show()
-
-# Majority voting
-deberta_preds_majority_dr = np.argmax(deberta_probs_arr, axis=1)
-roberta_preds_majority_dr = np.argmax(roberta_probs_arr, axis=1)
-
-final_majority_preds_dr = []
-for i in range(len(test_labels_deberta)):
-    votes = [deberta_preds_majority_dr[i], roberta_preds_majority_dr[i]]
-    final_pred = max(set(votes), key=votes.count)
-    final_majority_preds_dr.append(final_pred)
-
-print("\n=== ENSEMBLE (MAJORITY VOTING): DeBERTa + RoBERTa ===")
-print("\nClassification Report:")
-report = classification_report(test_labels_deberta, final_majority_preds_dr, target_names=['Negative', 'Neutral', 'Positive'], digits=4, output_dict=True)
-print(classification_report(test_labels_deberta, final_majority_preds_dr, target_names=['Negative', 'Neutral', 'Positive'], digits=4))
-print(f"\nOverall Metrics:")
-print(f"Accuracy: {report['accuracy']:.4f}")
-print(f"Precision (macro): {report['macro avg']['precision']:.4f}")
-print(f"Recall (macro): {report['macro avg']['recall']:.4f}")
-print(f"F1-Score (macro): {report['macro avg']['f1-score']:.4f}")
-
-cm_majority_dr = confusion_matrix(test_labels_deberta, final_majority_preds_dr)
-print("\nConfusion Matrix:")
-print(cm_majority_dr)
-
-plt.figure(figsize=(6, 5))
-sns.heatmap(cm_majority_dr, annot=True, fmt='d', cmap='Blues', xticklabels=['Negative', 'Neutral', 'Positive'], yticklabels=['Negative', 'Neutral', 'Positive'])
-plt.xlabel('Predicted')
-plt.ylabel('True')
-plt.title('ENSEMBLE (MAJORITY VOTING) - DeBERTa + RoBERTa')
-plt.show()
-
-# === SECTION 9: AUC Computation and Saving ===
-
-# Helper functions
-from sklearn.metrics import roc_auc_score, roc_curve, auc
-import matplotlib.pyplot as plt
-
-def compute_auc(y_true, y_probs, num_classes=3):
-    aucs = []
-    y_true_bin = np.eye(num_classes)[y_true]
-    for i in range(num_classes):
-        auc_i = roc_auc_score(y_true_bin[:, i], y_probs[:, i])
-        aucs.append(auc_i)
-    macro_auc = np.mean(aucs)
-    return aucs, macro_auc
-
-def plot_roc(y_true, y_probs, model_name, save_path=None):
-    num_classes = y_probs.shape[1]
-    y_true_bin = np.eye(num_classes)[y_true]
-
-    plt.figure(figsize=(8, 6))
-    for i in range(num_classes):
-        fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_probs[:, i])
-        roc_auc = auc(fpr, tpr)
-        plt.plot(fpr, tpr, label=f'Class {i} (AUC = {roc_auc:.4f})')
-
-    plt.plot([0, 1], [0, 1], 'k--', label='Chance')
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel('False Positive Rate')
-    plt.ylabel('True Positive Rate')
-    plt.title(f'ROC Curve - {model_name}')
-    plt.legend(loc='lower right')
-    plt.grid()
-
-    if save_path:
-        plt.savefig(save_path)
-    plt.show()
-
-# Initialize AUC summary dataframe
-auc_summary_df = pd.DataFrame(columns=['Model', 'Macro AUC', 'Class 0 AUC', 'Class 1 AUC', 'Class 2 AUC'])
-
-# === DeBERTa Softmax AUC ===
-aucs_deberta_softmax, macro_auc_deberta_softmax = compute_auc(test_labels_deberta, deberta_probs)
-plot_roc(test_labels_deberta, deberta_probs, model_name='DeBERTa Softmax', save_path='deberta_softmax_roc.png')
-auc_summary_df.loc[len(auc_summary_df)] = ['DeBERTa Softmax', macro_auc_deberta_softmax] + aucs_deberta_softmax
-
-# === DeBERTa + XGBoost AUC ===
-aucs_xgb_deberta, macro_auc_xgb_deberta = compute_auc(test_labels_deberta, xgb_probs_deberta)
-plot_roc(test_labels_deberta, xgb_probs_deberta, model_name='DeBERTa + XGBoost', save_path='deberta_xgb_roc.png')
-auc_summary_df.loc[len(auc_summary_df)] = ['DeBERTa + XGBoost', macro_auc_xgb_deberta] + aucs_xgb_deberta
-
-# === DeBERTa + LightGBM AUC ===
-aucs_lgb_deberta, macro_auc_lgb_deberta = compute_auc(test_labels_deberta, lgb_preds_probs_deberta)
-plot_roc(test_labels_deberta, lgb_preds_probs_deberta, model_name='DeBERTa + LightGBM', save_path='deberta_lgb_roc.png')
-auc_summary_df.loc[len(auc_summary_df)] = ['DeBERTa + LightGBM', macro_auc_lgb_deberta] + aucs_lgb_deberta
-
-# === RoBERTa Softmax AUC ===
-roberta_probs = np.array(roberta_probs)  # FIXED LINE - convert to array
-aucs_roberta_softmax, macro_auc_roberta_softmax = compute_auc(test_labels_roberta, roberta_probs)
-plot_roc(test_labels_roberta, roberta_probs, model_name='RoBERTa Softmax', save_path='roberta_softmax_roc.png')
-auc_summary_df.loc[len(auc_summary_df)] = ['RoBERTa Softmax', macro_auc_roberta_softmax] + aucs_roberta_softmax
-
-# === RoBERTa + XGBoost AUC ===
-xgb_probs_roberta = xgb_clf_roberta.predict_proba(test_embeddings_roberta)
-aucs_xgb_roberta, macro_auc_xgb_roberta = compute_auc(test_labels_roberta, xgb_probs_roberta)
-plot_roc(test_labels_roberta, xgb_probs_roberta, model_name='RoBERTa + XGBoost', save_path='roberta_xgb_roc.png')
-auc_summary_df.loc[len(auc_summary_df)] = ['RoBERTa + XGBoost', macro_auc_xgb_roberta] + aucs_xgb_roberta
-
-# === ENSEMBLE DeBERTa_XGBoost + RoBERTa_XGBoost ===
 avg_probs_xgb_dr = (xgb_probs_deberta + xgb_probs_roberta) / 2.0
 avg_preds_xgb_dr = np.argmax(avg_probs_xgb_dr, axis=1)
 
@@ -894,11 +473,51 @@ plt.ylabel('True')
 plt.title('ENSEMBLE (AVERAGING) - DeBERTa_XGBoost + RoBERTa_XGBoost')
 plt.show()
 
-# Compute AUC for ensemble
+# === SECTION 7: AUC Computation and Saving ===
+from sklearn.metrics import roc_auc_score, roc_curve, auc
+import matplotlib.pyplot as plt
+
+def compute_auc(y_true, y_probs, num_classes=3):
+    aucs = []
+    y_true_bin = np.eye(num_classes)[y_true]
+    for i in range(num_classes):
+        auc_i = roc_auc_score(y_true_bin[:, i], y_probs[:, i])
+        aucs.append(auc_i)
+    macro_auc = np.mean(aucs)
+    return aucs, macro_auc
+
+def plot_roc(y_true, y_probs, model_name, save_path=None):
+    num_classes = y_probs.shape[1]
+    y_true_bin = np.eye(num_classes)[y_true]
+    class_names = ['Negative', 'Neutral', 'Positive']
+
+    plt.figure(figsize=(8, 6))
+    for i in range(num_classes):
+        fpr, tpr, _ = roc_curve(y_true_bin[:, i], y_probs[:, i])
+        roc_auc = auc(fpr, tpr)
+        plt.plot(fpr, tpr, label=f'{class_names[i]} (AUC = {roc_auc:.4f})')
+
+    plt.plot([0, 1], [0, 1], 'k--', label='Chance')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(f'ROC Curve - {model_name}')
+    plt.legend(loc='lower right')
+    plt.grid()
+
+    if save_path:
+        plt.savefig(save_path)
+    plt.show()
+
+#AUC summary 
+auc_summary_df = pd.DataFrame(columns=['Model', 'Macro AUC', 'Class 0 AUC', 'Class 1 AUC', 'Class 2 AUC'])
+
+# === ENSEMBLE DeBERTa_XGBoost + RoBERTa_XGBoost ===
 aucs_xgb_dr_ensemble, macro_auc_xgb_dr_ensemble = compute_auc(test_labels_deberta, avg_probs_xgb_dr)
 plot_roc(test_labels_deberta, avg_probs_xgb_dr, model_name='ENSEMBLE - DeBERTa_XGBoost + RoBERTa_XGBoost', save_path='ensemble_xgb_dr_roc.png')
 auc_summary_df.loc[len(auc_summary_df)] = ['ENSEMBLE - DeBERTa_XGBoost + RoBERTa_XGBoost', macro_auc_xgb_dr_ensemble] + aucs_xgb_dr_ensemble
 
 # === Save AUC Summary CSV ===
 auc_summary_df.to_csv('auc_summary_all_models.csv', index=False)
-print("\n✅ AUC summary saved to 'auc_summary_all_models.csv'")
+print("\n AUC summary saved to 'auc_summary_all_models.csv'")
